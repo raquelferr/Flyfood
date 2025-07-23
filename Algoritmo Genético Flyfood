@@ -1,0 +1,281 @@
+import zipfile
+import xml.etree.ElementTree as ET
+import math
+import time
+from typing import List, Tuple, Callable, Dict
+from random import randint, random, sample, shuffle
+
+DISTANCES_MATRIX: List[List[float]] = []
+NUM_CIDADES: int = 0
+
+
+def read_xml_tsp_file(zip_filepath: str, xml_filename_in_zip: str):
+    global DISTANCES_MATRIX, NUM_CIDADES
+
+    distances_temp: List[List[float]] = []
+    num_cities_found: int = 0
+
+    try:
+        with zipfile.ZipFile(zip_filepath, 'r') as zf:
+            with zf.open(xml_filename_in_zip) as xml_file:
+                tree = ET.parse(xml_file)
+                root = tree.getroot()
+
+                vertices = root.findall(".//graph/vertex")
+                if not vertices:
+                    raise ValueError(
+                        "Nenhuma seção 'vertex' encontrada dentro de 'graph' no arquivo XML. Verifique o formato do XML.")
+
+                num_cities_found = len(vertices)
+                distances_temp = [[0.0] * num_cities_found for _ in range(num_cities_found)]
+
+                for i, vertex_element in enumerate(vertices):
+                    for edge_element in vertex_element.findall('edge'):
+                        try:
+                            cost = float(edge_element.get('cost'))
+                            dest_city_id = int(edge_element.text)
+                            dest_city_idx = dest_city_id - 1
+
+                            if 0 <= dest_city_idx < num_cities_found:
+                                distances_temp[i][dest_city_idx] = cost
+                                if distances_temp[dest_city_idx][i] == 0.0 and i != dest_city_idx:
+                                    distances_temp[dest_city_idx][i] = cost
+
+                        except (ValueError, TypeError) as e:
+                            pass
+
+    except FileNotFoundError:
+        raise ValueError(f"O arquivo ZIP não foi encontrado no caminho especificado: {zip_filepath}.")
+    except KeyError:
+        raise ValueError(f"O arquivo XML '{xml_filename_in_zip}' não foi encontrado dentro do ZIP.")
+    except ET.ParseError as e:
+        raise ValueError(f"Erro ao analisar o arquivo XML: {e}. O XML pode estar malformado.")
+    except Exception as e:
+        raise ValueError(f"Erro inesperado ao ler o arquivo ZIP/XML: {e}")
+
+    DISTANCES_MATRIX = distances_temp
+    NUM_CIDADES = num_cities_found
+    if not DISTANCES_MATRIX or NUM_CIDADES == 0:
+        raise ValueError(
+            "Nenhuma distância de cidade encontrada ou número de cidades inválido no arquivo XML. Verifique o arquivo e seu formato.")
+
+
+def calculate_distance(city1_idx: int, city2_idx: int) -> float:
+    if not DISTANCES_MATRIX:
+        raise ValueError("Erro: Matriz de distâncias não foi carregada. Verifique a leitura do arquivo.")
+    if city1_idx < 0 or city1_idx >= NUM_CIDADES or \
+            city2_idx < 0 or city2_idx >= NUM_CIDADES:
+        raise IndexError(
+            f"Erro: Índice de cidade fora dos limites. Cidades: {NUM_CIDADES}, Índices tentados: {city1_idx}, {city2_idx}")
+    return DISTANCES_MATRIX[city1_idx][city2_idx]
+
+
+def aptidao_individuo(cromossomo: List[int]) -> float:
+    total_distance = 0.0
+    for i in range(NUM_CIDADES):
+        city1_idx = cromossomo[i]
+        city2_idx = cromossomo[(i + 1) % NUM_CIDADES]
+        total_distance += calculate_distance(city1_idx, city2_idx)
+
+    return 1.0 / total_distance if total_distance > 0 else float('inf')
+
+
+def aptidao(pop: List[List[int]]) -> List[float]:
+    lista_aptidao: List[float] = [0] * len(pop)
+    for i, ind in enumerate(pop):
+        lista_aptidao[i] = aptidao_individuo(ind)
+    return lista_aptidao
+
+
+def cruzamento_pais(pai1: List[int], pai2: List[int], taxa_cruzamento: float) -> Tuple[List[int], List[int]]:
+    if random() <= taxa_cruzamento:
+        size = len(pai1)
+        start, end = sorted(sample(range(size), 2))
+
+        filho_1 = [-1] * size
+        filho_2 = [-1] * size
+
+        filho_1[start:end + 1] = pai1[start:end + 1]
+        filho_2[start:end + 1] = pai2[start:end + 1]
+
+        fill_point_1 = (end + 1) % size
+        fill_point_2 = (end + 1) % size
+
+        for i in range(size):
+            city_pai2 = pai2[(end + 1 + i) % size]
+            if city_pai2 not in filho_1:
+                filho_1[fill_point_1] = city_pai2
+                fill_point_1 = (fill_point_1 + 1) % size
+                if fill_point_1 == start:
+                    fill_point_1 = (end + 1) % size
+
+            city_pai1 = pai1[(end + 1 + i) % size]
+            if city_pai1 not in filho_2:
+                filho_2[fill_point_2] = city_pai1
+                fill_point_2 = (fill_point_2 + 1) % size
+                if fill_point_2 == start:
+                    fill_point_2 = (end + 1) % size
+        return filho_1, filho_2
+    return pai1, pai2
+
+
+def cruzamento(pais: List[List[int]], taxa_cruzamento: float) -> List[List[int]]:
+    lista_filhos: List[List[int]] = [None] * len(pais)
+    for i in range(0, len(pais), 2):
+        if i + 1 < len(pais):
+            filho1, filho2 = cruzamento_pais(pais[i], pais[i + 1], taxa_cruzamento)
+            lista_filhos[i] = filho1
+            lista_filhos[i + 1] = filho2
+        else:
+            lista_filhos[i] = pais[i]
+    return lista_filhos
+
+
+def mutacao_individuo(filho: List[int], taxa_mutacao: float) -> List[int]:
+    filho_mutado = list(filho)
+    if random() <= taxa_mutacao:
+        idx1, idx2 = sample(range(len(filho)), 2)
+        filho_mutado[idx1], filho_mutado[idx2] = filho_mutado[idx2], filho_mutado[idx1]
+    return filho_mutado
+
+
+def mutacao(filhos: List[List[int]], taxa_mutacao: float) -> List[List[int]]:
+    for i, ind in enumerate(filhos):
+        filhos[i] = mutacao_individuo(ind, taxa_mutacao)
+    return filhos
+
+
+def torneio(apt: List[float]) -> int:
+    """Seleção por torneio."""
+    pai1 = randint(0, len(apt) - 1)
+    pai2 = randint(0, len(apt) - 1)
+    return pai1 if apt[pai1] > apt[pai2] else pai2
+
+
+def selecao_pais(pop: List[List[int]], apt: List[float], sel_func: Callable) -> List[List[int]]:
+    lista_pais: List[List[int]] = [None] * len(pop)
+    for i in range(len(pop)):
+        idx_selecionado = sel_func(apt)
+        lista_pais[i] = pop[idx_selecionado]
+    return lista_pais
+
+
+def selecao_sobreviventes(
+        pop: List[List[int]], apt_pop: List[float], filhos: List[List[int]], apt_filhos: List[float]
+) -> Tuple[List[List[int]], List[float]]:
+    best_parent_idx = apt_pop.index(max(apt_pop))
+    best_parent_chromo = pop[best_parent_idx]
+    best_parent_apt = apt_pop[best_parent_idx]
+
+    worst_child_idx = apt_filhos.index(min(apt_filhos))
+
+    new_pop = list(filhos)
+    new_apt = list(apt_filhos)
+
+    if best_parent_apt > new_apt[worst_child_idx]:
+        new_pop[worst_child_idx] = best_parent_chromo
+        new_apt[worst_child_idx] = best_parent_apt
+
+    return new_pop, new_apt
+
+
+def populacao_inicial(tamanho_pop: int, n_genes: int) -> List[List[int]]:
+    pop: List[List[int]] = []
+    for _ in range(tamanho_pop):
+        individuo = list(range(n_genes))
+        shuffle(individuo)
+        pop.append(individuo)
+    return pop
+
+
+def imprimir_populacao(pop: List[List[int]], apt: List[float], geracao: int) -> None:
+    best_apt_current_gen = max(apt)
+    best_ind_current_gen = pop[apt.index(best_apt_current_gen)]
+
+    best_distance = 1.0 / best_apt_current_gen if best_apt_current_gen > 0 else float('inf')
+
+    print(f"--- Geração {geracao} ---")
+    print(f"Melhor rota da geração {geracao}: {best_ind_current_gen} | Distância: {best_distance:.2f}")
+    print("")
+
+
+def evolucao(
+        n_pop: int,
+        n_genes: int,
+        taxa_cruzamento: float,
+        taxa_mutacao: float,
+        n_geracoes: int,
+        sel_func: Callable,
+) -> Tuple[List[List[int]], List[float]]:
+    pop = populacao_inicial(n_pop, n_genes)
+    apt: List[float] = aptidao(pop)
+
+    overall_best_chromo = None
+    overall_best_apt = -float('inf')
+
+    for geracao in range(n_geracoes):
+        imprimir_populacao(pop, apt, geracao)
+
+        current_best_apt = max(apt)
+        if current_best_apt > overall_best_apt:
+            overall_best_apt = current_best_apt
+            overall_best_chromo = pop[apt.index(current_best_apt)]
+
+        pais = selecao_pais(pop, apt, sel_func)
+        filhos = cruzamento(pais, taxa_cruzamento)
+        filhos = mutacao(filhos, taxa_mutacao)
+        apt_filhos = aptidao(filhos)
+        pop, apt = selecao_sobreviventes(pop, apt, filhos, apt_filhos)
+
+    current_best_apt = max(apt)
+    if current_best_apt > overall_best_apt:
+        overall_best_apt = current_best_apt
+        overall_best_chromo = pop[apt.index(current_best_apt)]
+
+    return overall_best_chromo, overall_best_apt
+
+
+def principal():
+    zip_filepath = "brazil58.xml.zip"
+    xml_filename_in_zip = "brazil58.xml"
+
+    start_time_total = time.time()
+
+    try:
+        read_xml_tsp_file(zip_filepath, xml_filename_in_zip)
+    except ValueError as e:
+        print(f"Erro ao carregar o arquivo TSP: {e}")
+        return
+
+    if not DISTANCES_MATRIX or NUM_CIDADES == 0:
+        print(
+            f"Erro grave: Nenhuma distância ou número de cidades carregado do arquivo {zip_filepath}. Verifique o conteúdo do XML.")
+        return
+
+    taxa_cruzamento = 0.8
+    taxa_mutacao = 0.05
+    n_genes = NUM_CIDADES
+    n_pop = 100
+    n_geracoes = 500
+    sel_func = torneio
+
+    print(f"\nResolvendo TSP para {NUM_CIDADES} cidades (Brazil58 via XML de matriz de distâncias) com AG.")
+
+    start_time_alg = time.time()  # Início da medição de tempo do algoritmo
+    melhor_cromossomo, melhor_aptidao = evolucao(
+        n_pop, n_genes, taxa_cruzamento, taxa_mutacao, n_geracoes, sel_func
+    )
+    end_time_alg = time.time()
+
+    melhor_distancia = 1.0 / melhor_aptidao if melhor_aptidao > 0 else float('inf')
+
+    print(f"\n\nMelhor rota encontrada (AG): {melhor_cromossomo}")
+    print(f"Distância total da melhor rota (AG): {melhor_distancia:.2f}")
+    print(f"Tempo de execução do algoritmo (AG): {end_time_alg - start_time_alg:.4f} segundos")
+
+    end_time_total = time.time()
+    print(f"Tempo total de execução do script (AG): {end_time_total - start_time_total:.4f} segundos")
+
+
+if __name__ == "__main__":
+    principal()
