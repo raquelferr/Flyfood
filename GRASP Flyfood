@@ -1,0 +1,205 @@
+import random
+import zipfile
+import xml.etree.ElementTree as ET
+import math
+import sys
+import time
+from typing import List, Tuple, Callable
+
+DISTANCES_MATRIX: List[List[float]] = []
+NUM_CIDADES: int = 0
+
+
+def read_xml_distances(filepath: str):
+    global DISTANCES_MATRIX, NUM_CIDADES
+
+    distances_temp: List[List[float]] = []
+    num_cities_found: int = 0
+
+    try:
+        if filepath.endswith('.zip'):
+            zip_filename = filepath
+            xml_filename_in_zip = filepath.replace('.zip', '')
+
+            with zipfile.ZipFile(zip_filename, 'r') as zf:
+                with zf.open(xml_filename_in_zip) as xml_file:
+                    tree = ET.parse(xml_file)
+                    root = tree.getroot()
+        else:
+            tree = ET.parse(filepath)
+            root = tree.getroot()
+
+        vertices = root.findall(".//graph/vertex")
+        if not vertices:
+            raise ValueError(
+                "Nenhuma seção 'vertex' encontrada dentro de 'graph' no arquivo XML. Verifique o formato do XML.")
+
+        num_cities_found = len(vertices)
+
+        distances_temp = [[0.0] * num_cities_found for _ in range(num_cities_found)]
+
+        for i, vertex_element in enumerate(vertices):
+            for edge_element in vertex_element.findall('edge'):
+                try:
+                    cost = float(edge_element.get('cost'))
+                    dest_city_id = int(edge_element.text)
+                    dest_city_idx = dest_city_id - 1
+
+                    if 0 <= dest_city_idx < num_cities_found:
+                        distances_temp[i][dest_city_idx] = cost
+                        if distances_temp[dest_city_idx][i] == 0.0 and i != dest_city_idx:
+                            distances_temp[dest_city_idx][i] = cost
+                except (ValueError, TypeError) as e:
+                    pass
+
+    except FileNotFoundError:
+        raise ValueError(f"O arquivo não foi encontrado no caminho especificado: {filepath}.")
+    except zipfile.BadZipFile:
+        raise ValueError(f"O arquivo '{filepath}' não é um arquivo ZIP válido.")
+    except KeyError:
+        raise ValueError(f"O arquivo XML esperado não foi encontrado dentro do ZIP: '{xml_filename_in_zip}'.")
+    except ET.ParseError as e:
+        raise ValueError(f"Erro ao analisar o arquivo XML: {e}. O XML pode estar malformado.")
+    except Exception as e:
+        raise ValueError(f"Erro inesperado ao ler o arquivo: {e}")
+
+    DISTANCES_MATRIX = distances_temp
+    NUM_CIDADES = num_cities_found
+    if not DISTANCES_MATRIX or NUM_CIDADES == 0:
+        raise ValueError(
+            "Nenhuma distância de cidade encontrada ou número de cidades inválido no arquivo XML. Verifique o arquivo e seu formato.")
+
+
+def distancia(city1_idx: int, city2_idx: int) -> float:
+    if not DISTANCES_MATRIX:
+        raise ValueError("Erro: Matriz de distâncias não foi carregada. Verifique a leitura do arquivo.")
+    if city1_idx < 0 or city1_idx >= NUM_CIDADES or \
+            city2_idx < 0 or city2_idx >= NUM_CIDADES:
+        raise IndexError(
+            f"Erro: Índice de cidade fora dos limites. Cidades: {NUM_CIDADES}, Índices tentados: {city1_idx}, {city2_idx}")
+    return DISTANCES_MATRIX[city1_idx][city2_idx]
+
+
+def grasp(depot_city_idx: int, pontos_entrega: List[int], iteracoes_max=50, alpha=0.3):
+    melhor_rota = []
+    menor_custo = float('inf')
+
+    for _ in range(iteracoes_max):
+        rota = []
+        pontos_nao_visitados = pontos_entrega.copy()
+        ponto_atual = depot_city_idx
+
+        while pontos_nao_visitados:
+            distancias_para_nao_visitados = {
+                ponto: distancia(ponto_atual, ponto)
+                for ponto in pontos_nao_visitados
+            }
+            min_dist = min(distancias_para_nao_visitados.values())
+            max_dist = max(distancias_para_nao_visitados.values())
+
+            limite = min_dist + alpha * (max_dist - min_dist)
+            lrc = [
+                ponto for ponto in pontos_nao_visitados
+                if distancias_para_nao_visitados[ponto] <= limite
+            ]
+
+            proximo_ponto = random.choice(lrc)
+            rota.append(proximo_ponto)
+            pontos_nao_visitados.remove(proximo_ponto)
+            ponto_atual = proximo_ponto
+
+        rota, custo = busca_local(rota, depot_city_idx)
+
+        if custo < menor_custo:
+            menor_custo = custo
+            melhor_rota = rota
+
+    return melhor_rota, menor_custo
+
+
+def busca_local(rota: List[int], depot_city_idx: int):
+    melhor_rota = rota.copy()
+    custo = calcular_custo(melhor_rota, depot_city_idx)
+    melhorou = True
+
+    while melhorou:
+        melhorou = False
+        for i in range(len(melhor_rota)):
+            for j in range(i + 1, len(melhor_rota)):
+                nova_rota = melhor_rota[:i] + melhor_rota[i:j + 1][::-1] + melhor_rota[j + 1:]
+                novo_custo = calcular_custo(nova_rota, depot_city_idx)
+                if novo_custo < custo:
+                    melhor_rota = nova_rota
+                    custo = novo_custo
+                    melhorou = True
+    return melhor_rota, custo
+
+
+def calcular_custo(rota: List[int], depot_city_idx: int):
+    custo = 0.0
+    if not rota:
+        return 0.0
+
+    custo += distancia(depot_city_idx, rota[0])
+
+    for i in range(len(rota) - 1):
+        custo += distancia(rota[i], rota[i + 1])
+
+    custo += distancia(rota[len(rota) - 1], depot_city_idx)
+    return custo
+
+
+def main(entrada_filepath: str):
+    start_time_total = time.time()
+
+    try:
+        read_xml_distances(entrada_filepath)
+    except ValueError as e:
+        print(f"Erro ao carregar o arquivo TSP: {e}")
+        print("\n--- POSSÍVEIS SOLUÇÕES PARA O ERRO DE LEITURA DO ARQUIVO ---")
+        print(
+            "1. **Caminho do Arquivo:** Verifique se o caminho fornecido ('entrada_filepath') está CORRETO para o seu arquivo XML ou ZIP.")
+        print(
+            "2. **Formato do Arquivo XML:** O XML deve ter elementos '<vertex>' dentro de '<graph>', e cada '<vertex>' deve conter '<edge cost=\"...\">ID_DESTINO</edge>'. Se a estrutura for diferente, o código precisará de ajustes.")
+        print(
+            "3. **Arquivo ZIP:** Se for um ZIP, o nome do arquivo XML dentro do ZIP deve ser 'brazil58.xml' (ou o nome correto se for diferente).")
+        print("-------------------------------------------------------------")
+        return
+
+    if not DISTANCES_MATRIX or NUM_CIDADES == 0:
+        print("Erro grave: Nenhuma distância ou número de cidades carregado do arquivo. Verifique o conteúdo do XML.")
+        return
+
+    depot_city_idx = 0
+    pontos_entrega = [i for i in range(NUM_CIDADES) if i != depot_city_idx]
+
+    if not pontos_entrega and NUM_CIDADES > 1:
+        print("Não há pontos de entrega definidos (além do depot).")
+        return
+    elif NUM_CIDADES == 1:
+        print("Apenas uma cidade encontrada. A rota é trivial: [1] com custo 0.")
+        return
+
+    print(f"\nResolvendo TSP para {NUM_CIDADES} cidades (via XML de matriz de distâncias) com GRASP.")
+
+    start_time_alg = time.time()
+    melhor_rota_indices, menor_custo = grasp(depot_city_idx, pontos_entrega)
+    end_time_alg = time.time()
+
+    melhor_rota_ids_originais = [idx + 1 for idx in melhor_rota_indices]
+
+    print(f"\nMelhor rota encontrada (GRASP, IDs de cidade 1-indexadas): {melhor_rota_ids_originais}")
+    print(f"Custo total da melhor rota (GRASP): {menor_custo:.2f}")
+    print(f">>> Tempo de execução do algoritmo (GRASP): {end_time_alg - start_time_alg:.4f} segundos")
+
+    end_time_total = time.time()
+    print(f">>> Tempo total de execução do script (GRASP): {end_time_total - start_time_total:.4f} segundos")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        entrada_filepath = sys.argv[1]
+    else:
+        entrada_filepath = "brazil58.xml.zip"
+
+    main(entrada_filepath)
